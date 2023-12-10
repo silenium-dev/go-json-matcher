@@ -404,7 +404,7 @@ func TestJsonStringMatches(t *testing.T) {
 				t.Errorf("JSONStringMatches() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if got != tt.want {
+			if (len(got) == 0) != tt.want {
 				t.Errorf("JSONStringMatches() got = %v, want %v", got, tt.want)
 			}
 		})

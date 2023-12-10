@@ -9,7 +9,14 @@ import (
 	"time"
 )
 
-type matcher func(interface{}, interface{}) (bool, error)
+type Conflict struct {
+	Path     string      `json:"path,omitempty"`
+	Expected interface{} `json:"expected,omitempty"`
+	Actual   interface{} `json:"actual,omitempty"`
+	Error    error       `json:"error,omitempty"`
+}
+
+type matcher func(string, interface{}, interface{}) ([]Conflict, error)
 
 //nolint:gochecknoglobals // an internal global here is more efficient than repeatedly creating the map in a hot path
 var matchers map[reflect.Kind]matcher
@@ -34,20 +41,26 @@ func init() {
 // The pattern can be a valid literal value (in that case an exact match will
 // be required), a special marker (a string starting with the hash character
 // '#'), or any combination of these via arrays and objects.
-func JSONMatches(j []byte, jPatternSpecifier []byte) (bool, error) {
+func JSONMatches(j []byte, jPatternSpecifier []byte) ([]Conflict, error) {
 	var jAny interface{}
 	err := json.Unmarshal(j, &jAny)
 	if err != nil {
-		return false, fmt.Errorf("can't unmarshal left argument: %w", err)
+		return []Conflict{{
+			Path:  "/",
+			Error: err,
+		}}, fmt.Errorf("can't unmarshal left argument: %w", err)
 	}
 
 	var patternSpecAny interface{}
 	err = json.Unmarshal(jPatternSpecifier, &patternSpecAny)
 	if err != nil {
-		return false, fmt.Errorf("can't unmarshal pattern argument: %w", err)
+		return []Conflict{{
+			Path:  "/",
+			Error: err,
+		}}, fmt.Errorf("can't unmarshal pattern argument: %w", err)
 	}
 
-	return _match(jAny, patternSpecAny)
+	return _match("/", jAny, patternSpecAny)
 }
 
 // JSONStringMatches checks if the JSON string `j` provided with the first argument
@@ -56,16 +69,22 @@ func JSONMatches(j []byte, jPatternSpecifier []byte) (bool, error) {
 // The pattern can be a valid literal value (in that case an exact match will
 // be required), a special marker (a string starting with the hash character
 // '#'), or any combination of these via arrays and objects.
-func JSONStringMatches(j string, jPatternSpecifier string) (bool, error) {
+func JSONStringMatches(j string, jPatternSpecifier string) ([]Conflict, error) {
 	return JSONMatches([]byte(j), []byte(jPatternSpecifier))
 }
 
-func _matchZero(x interface{}) (bool, error) {
+func _matchZero(path string, x interface{}) []Conflict {
 	xV := reflect.ValueOf(x)
 	if !xV.IsValid() {
-		return true, nil
+		return []Conflict{}
 	}
-	return false, nil
+	return []Conflict{
+		{
+			Path:     path,
+			Expected: nil,
+			Actual:   x,
+		},
+	}
 }
 
 var uuidRe = regexp.MustCompile(`(?i)^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
@@ -78,13 +97,18 @@ const (
 )
 
 //nolint:funlen,gocognit // reducing the number of statements would reduce legibility in this instance
-func _matchWithMarker(x interface{}, marker string) (bool, error) {
+func _matchWithMarker(path string, x interface{}, marker string) ([]Conflict, error) {
+	possibleConflict := Conflict{
+		Path:     path,
+		Expected: marker,
+		Actual:   x,
+	}
 	if x == nil && (marker == ignoreMarker || marker == nullMarker || marker == presentMarker) {
-		return true, nil
+		return []Conflict{}, nil
 	}
 	xV := reflect.ValueOf(x)
 	if !xV.IsValid() {
-		return false, nil // here we now that ref is non-zero
+		return []Conflict{possibleConflict}, nil // here we now that ref is non-zero
 	}
 
 	//nolint:gomnd // the "magic" literal constant 2 here is clearer than a synthetic constant symbol
@@ -92,185 +116,200 @@ func _matchWithMarker(x interface{}, marker string) (bool, error) {
 
 	switch markerParts[0] {
 	case ignoreMarker:
-		return true, nil
+		return []Conflict{}, nil
 	case nullMarker:
 		if xV.Kind() != reflect.Ptr {
-			return false, nil
+			return []Conflict{possibleConflict}, nil
 		}
-		return xV.IsNil(), nil
+		if xV.IsNil() {
+			return []Conflict{}, nil
+		} else {
+			return []Conflict{possibleConflict}, nil
+		}
 	case "#notnull":
 		if xV.Kind() != reflect.Ptr {
-			return true, nil
+			return []Conflict{}, nil
 		}
-		return !xV.IsNil(), nil
+		if !xV.IsNil() {
+			return []Conflict{}, nil
+		} else {
+			return []Conflict{possibleConflict}, nil
+		}
 	case presentMarker:
-		return true, nil
+		return []Conflict{}, nil
 	case "#notpresent":
-		return false, nil
+		return []Conflict{possibleConflict}, nil
 	case "#array":
 		if (xV.Kind() != reflect.Array) && (xV.Kind() != reflect.Slice) {
-			return false, nil
+			return []Conflict{possibleConflict}, nil
 		}
-		return true, nil
+		return []Conflict{}, nil
 	case "#object":
 		if xV.Kind() != reflect.Map {
-			return false, nil
+			return []Conflict{possibleConflict}, nil
 		}
-		return true, nil
+		return []Conflict{}, nil
 	case "#bool":
 		fallthrough
 	case "#boolean":
 		if xV.Kind() != reflect.Bool {
-			return false, nil
+			return []Conflict{possibleConflict}, nil
 		}
-		return true, nil
+		return []Conflict{}, nil
 	case "#number":
 		if (xV.Kind() != reflect.Int64) && (xV.Kind() != reflect.Float64) {
-			return false, nil
+			return []Conflict{possibleConflict}, nil
 		}
-		return true, nil
+		return []Conflict{}, nil
 	case "#string":
 		if xV.Kind() != reflect.String {
-			return false, nil
+			return []Conflict{possibleConflict}, nil
 		}
-		return true, nil
+		return []Conflict{}, nil
 	case "#date":
 		if xV.Kind() == reflect.String {
 			xString, ok := x.(string)
 			if !ok {
-				return false, nil
+				return []Conflict{possibleConflict}, nil
 			}
 			_, err := time.Parse("2006-01-02", xString)
 			if err == nil {
-				return true, nil
+				return []Conflict{}, nil
 			}
-			return false, nil
+			return []Conflict{possibleConflict}, nil
 		} else if xV.Kind() == reflect.Struct {
 			_, ok := x.(time.Time)
 			if ok {
-				return true, nil
+				return []Conflict{}, nil
 			}
 		}
-		return false, nil
+		return []Conflict{possibleConflict}, nil
 
 	case "#datetime":
 		if xV.Kind() == reflect.String {
 			xString, ok := x.(string)
 			if !ok {
-				return false, nil
+				return []Conflict{possibleConflict}, nil
 			}
 			_, err := time.Parse(time.RFC3339, xString)
 			if err == nil {
-				return true, nil
+				return []Conflict{}, nil
 			}
-			return false, nil
+			return []Conflict{possibleConflict}, nil
 		} else if xV.Kind() == reflect.Struct {
 			_, ok := x.(time.Time)
 			if ok {
-				return true, nil
+				return []Conflict{}, nil
 			}
 		}
-		return false, nil
+		return []Conflict{possibleConflict}, nil
 	case "#uuid":
 		if xV.Kind() != reflect.String {
-			return false, nil
+			return []Conflict{possibleConflict}, nil
 		}
 		xString, ok := x.(string)
 		if ok {
-			return uuidRe.MatchString(xString), nil
+			if uuidRe.MatchString(xString) {
+				return []Conflict{}, nil
+			}
 		}
-		return false, nil
+		return []Conflict{possibleConflict}, nil
 	case "#uuid-v4":
 		if xV.Kind() != reflect.String {
-			return false, nil
+			return []Conflict{possibleConflict}, nil
 		}
 		xString, ok := x.(string)
 		if ok {
-			return uuidV4Re.MatchString(xString), nil
+			if uuidV4Re.MatchString(xString) {
+				return []Conflict{}, nil
+			}
 		}
-		return false, nil
+		return []Conflict{possibleConflict}, nil
 	case "#regex":
 		//nolint:gomnd // the "magic" literal constant 2 here is clearer than a synthetic constant symbol
 		if len(markerParts) != 2 {
-			return false, fmt.Errorf("expected exactly one argument for #regex")
+			return []Conflict{possibleConflict}, fmt.Errorf("expected exactly one argument for #regex")
 		}
 		r, err := regexp.Compile(markerParts[1])
 		if err != nil {
-			return false, fmt.Errorf("invalid regex argument to #regex: %w", err)
+			return []Conflict{possibleConflict}, fmt.Errorf("invalid regex argument to #regex: %w", err)
 		}
 		if xV.Kind() != reflect.String {
-			return false, nil
+			return []Conflict{possibleConflict}, nil
 		}
 		xString, ok := x.(string)
 		if ok {
-			return r.MatchString(xString), nil
+			if r.MatchString(xString) {
+				return []Conflict{}, nil
+			}
 		}
-		return false, nil
+		return []Conflict{possibleConflict}, nil
 		// TODO: "#[num] EXPR"
 	}
 
-	return false, fmt.Errorf("unsupported pattern '%s'", marker)
+	return []Conflict{possibleConflict}, fmt.Errorf("unsupported pattern '%s'", marker)
 }
 
-func _match(x interface{}, spec interface{}) (bool, error) {
+func _match(path string, x interface{}, spec interface{}) ([]Conflict, error) {
+	possibleConflict := Conflict{
+		Path:     path,
+		Expected: spec,
+		Actual:   x,
+	}
 	specV := reflect.ValueOf(spec)
 	if !specV.IsValid() {
-		return _matchZero(x)
+		return _matchZero(path, x), nil
 	}
 
 	if specV.Kind() == reflect.String {
 		isMarker, specMarker := getMarker(spec)
 		if isMarker {
-			return _matchWithMarker(x, specMarker)
+			return _matchWithMarker(path, x, specMarker)
 		}
 	}
 
 	xV := reflect.ValueOf(x)
 	if !xV.IsValid() {
-		return false, nil // here we now that spec is non-zero
+		return []Conflict{possibleConflict}, nil // here we now that spec is non-zero
 	}
 
 	if xV.Kind() != specV.Kind() {
-		return false, nil
+		return []Conflict{possibleConflict}, nil
 	}
 
 	if m, ok := matchers[specV.Kind()]; ok {
-		return m(x, spec)
+		return m(path, x, spec)
 	}
 	tX := reflect.TypeOf(x)
-	return false, fmt.Errorf("unable to compare %v (type: %v) - kind %v is not supported", x, tX, xV.Kind())
+	return []Conflict{possibleConflict}, fmt.Errorf("unable to compare %v (type: %v) - kind %v is not supported", x, tX, xV.Kind())
 }
 
-func _matchMap(x interface{}, y interface{}) (bool, error) {
+func _matchMap(path string, x interface{}, y interface{}) ([]Conflict, error) {
+	possibleConflict := Conflict{
+		Path:     path,
+		Expected: y,
+		Actual:   x,
+	}
 	vX := reflect.ValueOf(x)
 	if vX.Kind() != reflect.Map {
-		return false, fmt.Errorf("wrong kind for left value, expected Map, got %v", vX.Kind())
+		return []Conflict{possibleConflict}, fmt.Errorf("wrong kind for left value, expected Map, got %v", vX.Kind())
 	}
-	if reflect.ValueOf(y).Kind() != reflect.Map {
-		return false, fmt.Errorf("wrong kind for pattern value, expected Map, got %v", vX.Kind())
-	}
-
 	vY := reflect.ValueOf(y)
-
-	matches, err := _matchMapCheckIteratingObject(vX, vY)
-	if err != nil {
-		return false, err
+	if vY.Kind() != reflect.Map {
+		return []Conflict{possibleConflict}, fmt.Errorf("wrong kind for pattern value, expected Map, got %v", vX.Kind())
 	}
 
-	if !matches {
-		return false, nil
+	conflicts, err := _matchMapCheckIteratingObject(path, vX, vY)
+
+	if len(conflicts) > 0 {
+		return conflicts, err
 	}
 
-	matches, err = _matchMapCheckIteratingSpec(vX, vY)
-	if err != nil {
-		return false, err
-	}
-
-	return matches, nil
+	return _matchMapCheckIteratingSpec(path, vX, vY)
 }
 
-func _matchMapCheckIteratingObject(vX reflect.Value, vY reflect.Value) (bool, error) {
-	matches := true
+func _matchMapCheckIteratingObject(path string, vX reflect.Value, vY reflect.Value) ([]Conflict, error) {
+	var conflicts []Conflict
 	iterX := vX.MapRange()
 	for iterX.Next() {
 		ySpecValue := vY.MapIndex(iterX.Key())
@@ -278,35 +317,42 @@ func _matchMapCheckIteratingObject(vX reflect.Value, vY reflect.Value) (bool, er
 			// missing spec for this key, skip...
 			continue
 		}
-		itemMatches, err := _match(iterX.Value().Interface(), ySpecValue.Interface())
+		itemConflicts, err := _match(path+"/"+fmt.Sprint(iterX.Key()), iterX.Value().Interface(), ySpecValue.Interface())
+		conflicts = append(conflicts, itemConflicts...)
 		if err != nil {
-			return false, fmt.Errorf("can't compare map element %v: %w", iterX.Key().Interface(), err)
+			return conflicts, fmt.Errorf("can't compare map element %s/%v: %w", path, iterX.Key().Interface(), err)
 		}
-		matches = matches && itemMatches
 	}
-	return matches, nil
+	return conflicts, nil
 }
 
-func _matchMapCheckIteratingSpec(vX reflect.Value, vY reflect.Value) (bool, error) {
-	matches := true
+func _matchMapCheckIteratingSpec(path string, vX reflect.Value, vY reflect.Value) ([]Conflict, error) {
+	var conflicts []Conflict
 	iterY := vY.MapRange()
 	for iterY.Next() {
 		ySpecValue := iterY.Value()
 		xValue := vX.MapIndex(iterY.Key())
+		possibleConflict := Conflict{
+			Path:     path + "/" + fmt.Sprint(iterY.Key()),
+			Expected: iterY.Value().Interface(),
+			Actual:   fmt.Sprint(xValue),
+		}
 
 		//nolint:wastedassign // defensive programming here...
-		itemMatches := false
+		var itemConflicts []Conflict
 		if ySpecValue.Kind() == reflect.Interface {
 			isMarker, marker := getMarker(ySpecValue.Interface())
 			if isMarker {
 				switch marker {
 				case "#notpresent":
-					itemMatches = !xValue.IsValid()
-					matches = matches && itemMatches
+					if xValue.IsValid() {
+						conflicts = append(conflicts, possibleConflict)
+					}
 					continue
 				case presentMarker:
-					itemMatches = xValue.IsValid()
-					matches = matches && itemMatches
+					if !xValue.IsValid() {
+						conflicts = append(conflicts, possibleConflict)
+					}
 					continue
 				}
 			}
@@ -314,18 +360,18 @@ func _matchMapCheckIteratingSpec(vX reflect.Value, vY reflect.Value) (bool, erro
 
 		if !isMarker(ySpecValue.Interface(), ignoreMarker) {
 			if !xValue.IsValid() {
-				matches = false
+				conflicts = append(conflicts, possibleConflict)
 			} else {
 				var err error
-				itemMatches, err = _match(xValue.Interface(), ySpecValue.Interface())
+				itemConflicts, err = _match(path+"/"+fmt.Sprint(iterY.Key()), xValue.Interface(), ySpecValue.Interface())
+				conflicts = append(conflicts, itemConflicts...)
 				if err != nil {
-					return false, fmt.Errorf("can't compare map element %v: %w", iterY.Key().Interface(), err)
+					return conflicts, fmt.Errorf("can't compare map element %v: %w", iterY.Key().Interface(), err)
 				}
-				matches = matches && itemMatches
 			}
 		}
 	}
-	return matches, nil
+	return conflicts, nil
 }
 
 func getMarker(y interface{}) (bool, string) {
@@ -341,13 +387,19 @@ func isMarker(y interface{}, marker string) bool {
 	return isMarker && marker == gotMarker
 }
 
-func _matchSlice(x interface{}, y interface{}) (bool, error) {
+func _matchSlice(path string, x interface{}, y interface{}) ([]Conflict, error) {
+	possibleConflict := Conflict{
+		Path:     path,
+		Expected: y,
+		Actual:   x,
+	}
+
 	vX := reflect.ValueOf(x)
 	if vX.Kind() != reflect.Slice {
-		return false, fmt.Errorf("wrong kind for left value, expected Slice, got %v", vX.Kind())
+		return []Conflict{possibleConflict}, fmt.Errorf("wrong kind for left value, expected Slice, got %v", vX.Kind())
 	}
 	if reflect.ValueOf(y).Kind() != reflect.Slice {
-		return false, fmt.Errorf("wrong kind for pattern value, expected Slice, got %v", vX.Kind())
+		return []Conflict{possibleConflict}, fmt.Errorf("wrong kind for pattern value, expected Slice, got %v", vX.Kind())
 	}
 
 	vY := reflect.ValueOf(y)
@@ -363,10 +415,10 @@ func _matchSlice(x interface{}, y interface{}) (bool, error) {
 			arrayOf = vY.Index(1).Interface()
 		}
 	} else if vX.Len() != vY.Len() {
-		return false, nil
+		return []Conflict{possibleConflict}, nil
 	}
 
-	matches := true
+	var conflicts []Conflict
 	sliceLen := vX.Len()
 	for i := 0; i < sliceLen; i++ {
 		var ySpecElem interface{}
@@ -375,15 +427,24 @@ func _matchSlice(x interface{}, y interface{}) (bool, error) {
 		} else {
 			ySpecElem = vY.Index(i).Interface()
 		}
-		itemMatches, err := _match(vX.Index(i).Interface(), ySpecElem)
+		itemMatches, err := _match(path+"["+fmt.Sprint(i)+"]", vX.Index(i).Interface(), ySpecElem)
+		conflicts = append(conflicts, itemMatches...)
 		if err != nil {
-			return false, fmt.Errorf("can't compare slice element %v: %w", i, err)
+			return conflicts, fmt.Errorf("can't compare slice element %v: %w", i, err)
 		}
-		matches = matches && itemMatches
 	}
-	return matches, nil
+	return conflicts, nil
 }
 
-func _matchPrimitive(x interface{}, y interface{}) (bool, error) {
-	return reflect.DeepEqual(x, y), nil
+func _matchPrimitive(path string, x interface{}, y interface{}) ([]Conflict, error) {
+	if !reflect.DeepEqual(x, y) {
+		return []Conflict{
+			{
+				Path:     path,
+				Expected: y,
+				Actual:   x,
+			},
+		}, nil
+	}
+	return []Conflict{}, nil
 }
