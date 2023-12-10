@@ -422,7 +422,8 @@ func _matchSlice(path string, x interface{}, y interface{}) ([]Conflict, error) 
 			isArrayOf = true
 			arrayOf = vY.Index(1).Interface()
 		}
-	} else if vX.Len() != vY.Len() {
+	}
+	if !isArrayOf && vX.Len() != vY.Len() {
 		return []Conflict{possibleConflict}, nil
 	}
 
@@ -435,8 +436,8 @@ func _matchSlice(path string, x interface{}, y interface{}) ([]Conflict, error) 
 		} else {
 			ySpecElem = vY.Index(i).Interface()
 		}
-		itemMatches, err := _match(path+"["+fmt.Sprint(i)+"]", vX.Index(i).Interface(), ySpecElem)
-		conflicts = append(conflicts, itemMatches...)
+		itemConflicts, err := _match(path+"["+fmt.Sprint(i)+"]", vX.Index(i).Interface(), ySpecElem)
+		conflicts = append(conflicts, itemConflicts...)
 		if err != nil {
 			return conflicts, fmt.Errorf("can't compare slice element %v: %w", i, err)
 		}
