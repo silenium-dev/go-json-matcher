@@ -60,7 +60,15 @@ func JSONMatches(j []byte, jPatternSpecifier []byte) ([]Conflict, error) {
 		}}, fmt.Errorf("can't unmarshal pattern argument: %w", err)
 	}
 
-	return _match("/", jAny, patternSpecAny)
+	conflicts, err := _match("/", jAny, patternSpecAny)
+	var resultingConflicts []Conflict
+	for _, c := range conflicts {
+		if strings.HasPrefix(c.Path, "//") {
+			c.Path = c.Path[1:]
+		}
+		resultingConflicts = append(resultingConflicts, c)
+	}
+	return resultingConflicts, err
 }
 
 // JSONStringMatches checks if the JSON string `j` provided with the first argument
